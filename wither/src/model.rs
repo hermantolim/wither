@@ -3,12 +3,12 @@
 use std::collections::HashMap;
 
 use async_trait::async_trait;
-use mongodb::bson::oid::ObjectId;
+use mongodb::{Collection, Database};
 use mongodb::bson::{doc, from_bson, to_bson};
 use mongodb::bson::{Bson, Document};
+use mongodb::bson::oid::ObjectId;
 use mongodb::options;
 use mongodb::results::DeleteResult;
-use mongodb::{Collection, Database};
 use serde::{de::DeserializeOwned, Serialize};
 
 use crate::common::IndexModel;
@@ -90,21 +90,23 @@ where
     }
 
     /// Find all instances of this model matching the given query.
-    async fn find<F, O>(db: &Database, filter: F, options: O) -> Result<ModelCursor<Self>>
+    async fn find<O>(db: &Database, filter: Document, options: O) -> Result<ModelCursor<Self>>
     where
-        F: Into<Option<Document>> + Send,
         O: Into<Option<options::FindOptions>> + Send,
     {
-        Ok(Self::collection(db).find(filter, options).await.map(ModelCursor::new)?)
+        Ok(Self::collection(db)
+            .find(filter)
+            .with_options(options)
+            .await
+            .map(ModelCursor::new)?)
     }
 
     /// Find the one model record matching your query, returning a model instance.
-    async fn find_one<F, O>(db: &Database, filter: F, options: O) -> Result<Option<Self>>
+    async fn find_one<O>(db: &Database, filter: Document, options: O) -> Result<Option<Self>>
     where
-        F: Into<Option<Document>> + Send,
         O: Into<Option<options::FindOneOptions>> + Send,
     {
-        Ok(Self::collection(db).find_one(filter, options).await?)
+        Ok(Self::collection(db).find_one(filter).with_options(options).await?)
     }
 
     /// Finds a single document and deletes it, returning the original.
@@ -112,7 +114,10 @@ where
     where
         O: Into<Option<options::FindOneAndDeleteOptions>> + Send,
     {
-        Ok(Self::collection(db).find_one_and_delete(filter, options).await?)
+        Ok(Self::collection(db)
+            .find_one_and_delete(filter)
+            .with_options(options)
+            .await?)
     }
 
     /// Finds a single document and replaces it, returning either the original or replaced document.
@@ -121,7 +126,8 @@ where
         O: Into<Option<options::FindOneAndReplaceOptions>> + Send,
     {
         Ok(Self::collection(db)
-            .find_one_and_replace(filter, replacement, options)
+            .find_one_and_replace(filter, replacement)
+            .with_options(options)
             .await?)
     }
 
@@ -131,7 +137,10 @@ where
         U: Into<options::UpdateModifications> + Send,
         O: Into<Option<options::FindOneAndUpdateOptions>> + Send,
     {
-        Ok(Self::collection(db).find_one_and_update(filter, update, options).await?)
+        Ok(Self::collection(db)
+            .find_one_and_update(filter, update)
+            .with_options(options)
+            .await?)
     }
 
     //////////////////////////////////////////////////////////////////////////////////////////////
@@ -181,7 +190,8 @@ where
             .return_document(Some(options::ReturnDocument::After))
             .build();
         let updated_doc = coll
-            .find_one_and_replace(filter, &(*self), Some(opts))
+            .find_one_and_replace(filter, &(*self))
+            .with_options(Some(opts))
             .await?
             .ok_or(WitherError::ServerFailedToReturnUpdatedDoc)?;
         let updated_doc = Self::document_from_instance(&updated_doc)?;
@@ -251,7 +261,8 @@ where
 
         // Perform a FindOneAndUpdate operation on this model's document by ID.
         Ok(Self::collection(db)
-            .find_one_and_update(filter, update, Some(options))
+            .find_one_and_update(filter, update)
+            .with_options(Some(options))
             .await?
             .ok_or(WitherError::ServerFailedToReturnUpdatedDoc)?)
     }
@@ -262,7 +273,7 @@ where
     async fn delete(&self, db: &Database) -> Result<DeleteResult> {
         // Return an error if the instance was never saved.
         let id = self.id().ok_or(WitherError::ModelIdRequiredForOperation)?;
-        Ok(Self::collection(db).delete_one(doc! {"_id": id}, None).await?)
+        Ok(Self::collection(db).delete_one(doc! {"_id": id}).await?)
     }
 
     /// Deletes all documents stored in the collection matching filter.
@@ -272,7 +283,7 @@ where
     where
         O: Into<Option<options::DeleteOptions>> + Send,
     {
-        Ok(Self::collection(db).delete_many(filter, options).await?)
+        Ok(Self::collection(db).delete_many(filter).with_options(options).await?)
     }
 
     //////////////////////////////////////////////////////////////////////////////////////////////
@@ -321,8 +332,8 @@ where
 }
 
 /// Get current collection indexes, if any.
-async fn get_current_indexes<T>(db: &Database, coll: &Collection<T>) -> Result<HashMap<String, IndexModel>> {
-    let list_indexes = match db.run_command(doc! {"listIndexes": coll.name()}, None).await {
+async fn get_current_indexes<T: Send + Sync>(db: &Database, coll: &Collection<T>) -> Result<HashMap<String, IndexModel>> {
+    let list_indexes = match db.run_command(doc! {"listIndexes": coll.name()}).await {
         Ok(list_indexes) => list_indexes,
         Err(err) => match err.kind.as_ref() {
             // The DB & or collection does not yet exist. Move on.
@@ -407,8 +418,11 @@ fn build_index_map(list_index: Document) -> HashMap<String, IndexModel> {
     index_map
 }
 
-async fn sync_model_indexes<'a, T>(
-    db: &'a Database, coll: &'a Collection<T>, model_indexes: Vec<IndexModel>, current_indexes_map: HashMap<String, IndexModel>,
+async fn sync_model_indexes<'a, T: Send + Sync>(
+    db: &'a Database,
+    coll: &'a Collection<T>,
+    model_indexes: Vec<IndexModel>,
+    current_indexes_map: HashMap<String, IndexModel>,
 ) -> Result<()> {
     log::info!("Synchronizing indexes for '{}'.", coll.namespace());
 
@@ -474,7 +488,7 @@ async fn sync_model_indexes<'a, T>(
             "dropIndexes": coll.name(),
             "index": index_name,
         };
-        db.run_command(drop_command, None).await?;
+        db.run_command(drop_command).await?;
     }
 
     // Create any indexes which have been flagged for creation.
@@ -488,13 +502,10 @@ async fn sync_model_indexes<'a, T>(
         acc
     });
     if !indexes_to_create.is_empty() {
-        db.run_command(
-            doc! {
-                "createIndexes": coll.name(),
-                "indexes": indexes_to_create,
-            },
-            None,
-        )
+        db.run_command(doc! {
+            "createIndexes": coll.name(),
+            "indexes": indexes_to_create,
+        })
         .await?;
     }
 

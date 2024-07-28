@@ -5,28 +5,25 @@ pub use async_trait::async_trait;
 pub use mongodb;
 pub use mongodb::bson;
 
+pub use common::IndexModel;
+pub use cursor::ModelCursor;
+pub use error::{Result, WitherError};
+pub use migration::{IntervalMigration, Migration};
+pub use model::Model;
 pub use wither_derive::Model;
-#[cfg(any(feature = "sync"))]
-pub use wither_derive::ModelSync;
 
 // Common //
-mod error;
-pub use error::{Result, WitherError};
 mod common;
-pub use common::IndexModel;
-
+mod error;
 // Async //
 mod cursor;
-pub use cursor::ModelCursor;
-
 mod migration;
-pub use migration::{IntervalMigration, Migration};
 mod model;
-pub use model::Model;
 
 /// All traits needed for basic usage of the wither system.
 pub mod prelude {
+    pub use wither_derive::Model;
+
     pub use crate::migration::{Migrating, Migration};
     pub use crate::model::Model;
-    pub use wither_derive::Model;
 }

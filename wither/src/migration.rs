@@ -1,6 +1,6 @@
 use async_trait::async_trait;
-use mongodb::bson::{doc, Bson, Document};
-use mongodb::{options, Collection, Database};
+use mongodb::{Collection, Database, options};
+use mongodb::bson::{Bson, doc, Document};
 
 use crate::error::{Result, WitherError};
 use crate::model::Model;
@@ -31,7 +31,7 @@ pub trait Migrating: Model {
 /// A trait describing objects which encapsulate a schema migration.
 #[cfg_attr(feature = "docinclude", doc(include = "../docs/migrations-overview.md"))]
 #[async_trait]
-pub trait Migration<T>: Send + Sync {
+pub trait Migration<T: Send + Sync>: Send + Sync {
     /// The function which is to execute this migration.
     async fn execute<'c>(&self, coll: &'c Collection<T>) -> Result<()>;
 }
@@ -60,7 +60,7 @@ pub struct IntervalMigration {
 }
 
 #[async_trait]
-impl<T: Sync> Migration<T> for IntervalMigration {
+impl<T: Send + Sync> Migration<T> for IntervalMigration {
     async fn execute<'c>(&self, coll: &'c Collection<T>) -> Result<()> {
         let ns = coll.namespace();
         log::info!("Executing migration '{}' against '{}'.", &self.name, ns);
@@ -93,7 +93,11 @@ impl<T: Sync> Migration<T> for IntervalMigration {
                     .build(),
             ))
             .build();
-        let res = coll.update_many(self.filter.clone(), update, Some(options)).await?;
+        let res = coll
+            .update_many(self.filter.clone(), update)
+            .with_options(Some(options))
+            .await?;
+
         log::info!(
             "Successfully executed migration '{}' against '{}'. {} matched. {} modified.",
             &self.name,

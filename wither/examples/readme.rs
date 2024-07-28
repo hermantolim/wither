@@ -1,8 +1,9 @@
 use futures::stream::StreamExt;
 use serde::{Deserialize, Serialize};
+
+use wither::{prelude::*, Result};
 use wither::bson::{doc, oid::ObjectId};
 use wither::mongodb::Client;
-use wither::{prelude::*, Result};
 
 // Define a model. Simple as deriving a few traits.
 #[derive(Debug, Model, Serialize, Deserialize)]
@@ -33,7 +34,7 @@ async fn main() -> Result<()> {
         .await?;
 
     // Fetch all users.
-    let mut cursor = User::find(&db, None, None).await?;
+    let mut cursor = User::find(&db, doc! {}, None).await?;
     while let Some(user) = cursor.next().await {
         println!("{:?}", user);
     }
