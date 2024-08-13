@@ -15,7 +15,7 @@ edition = "2018"
 [dependencies]
 chrono = { version = "0.4.38" }
 log = { version = "0.4.22" }
-mongodb = { version = "3.0.1", default-features = false, features = ["compat-3-0-0"] }
+mongodb = { version = "3.0.1" }
 serde = { version = "1", features = ["derive"] }
 wither_derive = { version = "0.9.0", path = "../wither_derive", default-features = false }
 async-trait = { version = "0.1.81" }
