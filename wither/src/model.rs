@@ -405,7 +405,7 @@ fn build_index_map(list_index: Document) -> HashMap<String, IndexModel> {
                 None => return acc,
             };
 
-            match idx_keys.get_document("_fts").ok() {
+            match idx_keys.get_str("_fts").ok() {
                 Some(_) => return acc,
                 None => {}
             }
