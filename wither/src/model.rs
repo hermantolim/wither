@@ -3,12 +3,13 @@
 use std::collections::HashMap;
 
 use async_trait::async_trait;
-use mongodb::{Collection, Database};
+use log::info;
+use mongodb::bson::oid::ObjectId;
 use mongodb::bson::{doc, from_bson, to_bson};
 use mongodb::bson::{Bson, Document};
-use mongodb::bson::oid::ObjectId;
 use mongodb::options;
 use mongodb::results::DeleteResult;
+use mongodb::{Collection, Database};
 use serde::{de::DeserializeOwned, Serialize};
 
 use crate::common::IndexModel;
@@ -350,9 +351,11 @@ async fn get_current_indexes<T: Send + Sync>(db: &Database, coll: &Collection<T>
 /// https://github.com/mongodb/specifications/blob/master/source/index-management.rst#index-name-generation
 fn generate_index_name_from_keys(keys: &Document) -> String {
     let mut key = keys.iter().fold(String::from(""), |mut acc, (key, value)| {
+        info!("index map from key {}, {:?}", key, value);
         acc.push_str(&format!("{}_{}_", key, value.as_i32().unwrap_or(0)));
         acc
     });
+    info!("index key {}", key);
     // Remove last underscore
     key.pop();
     key
