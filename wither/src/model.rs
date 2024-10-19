@@ -2,6 +2,10 @@
 
 use std::collections::HashMap;
 
+use crate::bson::document::ValueAccessResult;
+use crate::common::IndexModel;
+use crate::cursor::ModelCursor;
+use crate::error::{Result, WitherError};
 use async_trait::async_trait;
 use log::info;
 use mongodb::bson::oid::ObjectId;
@@ -11,10 +15,6 @@ use mongodb::options;
 use mongodb::results::DeleteResult;
 use mongodb::{Collection, Database};
 use serde::{de::DeserializeOwned, Serialize};
-
-use crate::common::IndexModel;
-use crate::cursor::ModelCursor;
-use crate::error::{Result, WitherError};
 
 const MONGO_ID_INDEX_NAME: &str = "_id_";
 const MONGO_DIFF_INDEX_BLACKLIST: [&str; 3] = ["v", "ns", "key"];
@@ -404,6 +404,12 @@ fn build_index_map(list_index: Document) -> HashMap<String, IndexModel> {
                 Some(idx_keys) => idx_keys,
                 None => return acc,
             };
+
+            match idx_keys.get_document("_fts").ok() {
+                Some(_) => return acc,
+                None => {}
+            }
+
             let index_name = generate_index_name_from_keys(idx_keys);
 
             // Build index model, filtering out blacklisted keys.
@@ -427,7 +433,7 @@ async fn sync_model_indexes<'a, T: Send + Sync>(
     model_indexes: Vec<IndexModel>,
     current_indexes_map: HashMap<String, IndexModel>,
 ) -> Result<()> {
-    log::info!("Synchronizing indexes for '{}'.", coll.namespace());
+    info!("Synchronizing indexes for '{}'.", coll.namespace());
 
     // Build a mapping of aspired indexes based on the model's declared indexes.
     let aspired_indexes_map = model_indexes.iter().fold(HashMap::new(), |mut acc, model| {
@@ -512,7 +518,7 @@ async fn sync_model_indexes<'a, T: Send + Sync>(
         .await?;
     }
 
-    log::info!("Synchronized indexes for '{}'.", coll.namespace());
+    info!("Synchronized indexes for '{}'.", coll.namespace());
 
     Ok(())
 }
