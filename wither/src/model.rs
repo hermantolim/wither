@@ -2,7 +2,6 @@
 
 use std::collections::HashMap;
 
-use crate::bson::document::ValueAccessResult;
 use crate::common::IndexModel;
 use crate::cursor::ModelCursor;
 use crate::error::{Result, WitherError};
@@ -11,8 +10,8 @@ use log::info;
 use mongodb::bson::oid::ObjectId;
 use mongodb::bson::{doc, from_bson, to_bson};
 use mongodb::bson::{Bson, Document};
-use mongodb::options;
 use mongodb::results::DeleteResult;
+use mongodb::{options, ClientSession};
 use mongodb::{Collection, Database};
 use serde::{de::DeserializeOwned, Serialize};
 
@@ -121,6 +120,17 @@ where
             .await?)
     }
 
+    async fn find_one_and_delete_with_session<O>(db: &Database, filter: Document, options: O, session: &mut ClientSession) -> Result<Option<Self>>
+    where
+        O: Into<Option<options::FindOneAndDeleteOptions>> + Send,
+    {
+        Ok(Self::collection(db)
+            .find_one_and_delete(filter)
+            .with_options(options)
+            .session(session)
+            .await?)
+    }
+
     /// Finds a single document and replaces it, returning either the original or replaced document.
     async fn find_one_and_replace<O>(db: &Database, filter: Document, replacement: &Self, options: O) -> Result<Option<Self>>
     where
@@ -129,6 +139,24 @@ where
         Ok(Self::collection(db)
             .find_one_and_replace(filter, replacement)
             .with_options(options)
+            .await?)
+    }
+
+    /// Finds a single document and replaces it, returning either the original or replaced document.
+    async fn find_one_and_replace_with_session<O>(
+        db: &Database,
+        filter: Document,
+        replacement: &Self,
+        options: O,
+        session: &mut ClientSession,
+    ) -> Result<Option<Self>>
+    where
+        O: Into<Option<options::FindOneAndReplaceOptions>> + Send,
+    {
+        Ok(Self::collection(db)
+            .find_one_and_replace(filter, replacement)
+            .with_options(options)
+            .session(session)
             .await?)
     }
 
@@ -141,6 +169,25 @@ where
         Ok(Self::collection(db)
             .find_one_and_update(filter, update)
             .with_options(options)
+            .await?)
+    }
+
+    /// Finds a single document and updates it, returning either the original or updated document.
+    async fn find_one_and_update_with_session<U, O>(
+        db: &Database,
+        filter: Document,
+        update: U,
+        options: O,
+        session: &mut ClientSession,
+    ) -> Result<Option<Self>>
+    where
+        U: Into<options::UpdateModifications> + Send,
+        O: Into<Option<options::FindOneAndUpdateOptions>> + Send,
+    {
+        Ok(Self::collection(db)
+            .find_one_and_update(filter, update)
+            .with_options(options)
+            .session(session)
             .await?)
     }
 
@@ -193,6 +240,67 @@ where
         let updated_doc = coll
             .find_one_and_replace(filter, &(*self))
             .with_options(Some(opts))
+            .await?
+            .ok_or(WitherError::ServerFailedToReturnUpdatedDoc)?;
+        let updated_doc = Self::document_from_instance(&updated_doc)?;
+
+        // Update instance ID if needed.
+        if id_needs_update {
+            let response_id = updated_doc
+                .get_object_id("_id")
+                .map_err(|_| WitherError::ServerFailedToReturnObjectId)?;
+            self.set_id(response_id);
+        };
+        Ok(())
+    }
+
+    /// Save the current model instance.
+    ///
+    /// In order to make this method as flexible as possible, its behavior varies a little based
+    /// on the input and the state of the instance.
+    ///
+    /// When the instance already has an ID, this method will operate purely based on the instance
+    /// ID. If no ID is present, and no `filter` has been specified, then an ID will be generated.
+    ///
+    /// If a `filter` is specified, and no ID exists for the instance, then the filter will be used
+    /// and the first document matching the filter will be replaced by this instance. This is
+    /// useful when the model has unique indexes on fields which need to be the target of the save
+    /// operation.
+    ///
+    /// **NOTE WELL:** in order to ensure needed behavior of this method, it will force `journaled`
+    /// write concern.
+    async fn save_with_session(&mut self, db: &Database, filter: Option<Document>, session: &mut ClientSession) -> Result<()> {
+        let coll = Self::collection(db);
+
+        // Ensure that journaling is set to true for this call, as we need to be able to get an ID back.
+        let mut write_concern = Self::write_concern().unwrap_or_default();
+        write_concern.journal = Some(true);
+
+        // Handle case where instance already has an ID.
+        let mut id_needs_update = false;
+        let filter = match (self.id(), filter) {
+            (Some(id), _) => doc! {"_id": id},
+            (None, None) => {
+                let new_id = ObjectId::new();
+                self.set_id(new_id);
+                doc! {"_id": new_id}
+            }
+            (None, Some(filter)) => {
+                id_needs_update = true;
+                filter
+            }
+        };
+
+        // Save the record by replacing it entirely, or upserting if it doesn't already exist.
+        let opts = options::FindOneAndReplaceOptions::builder()
+            .upsert(Some(true))
+            .write_concern(Some(write_concern))
+            .return_document(Some(options::ReturnDocument::After))
+            .build();
+        let updated_doc = coll
+            .find_one_and_replace(filter, &(*self))
+            .with_options(Some(opts))
+            .session(session)
             .await?
             .ok_or(WitherError::ServerFailedToReturnUpdatedDoc)?;
         let updated_doc = Self::document_from_instance(&updated_doc)?;
@@ -268,6 +376,75 @@ where
             .ok_or(WitherError::ServerFailedToReturnUpdatedDoc)?)
     }
 
+    /// Update the current model instance.
+    ///
+    /// This operation will always target the model instance by the instance's ID. If its ID is
+    /// `None`, this method will return an error. If a filter document is provided, this method
+    /// will ensure that the key `_id` is set to this model's ID.
+    ///
+    /// This method will consume `self`, and will return a new instance of `Self` based on the given
+    /// return options (`ReturnDocument::Before | ReturnDocument:: After`).
+    ///
+    /// In order to provide consistent behavior, this method will also ensure that the operation's
+    /// write concern `journaling` is set to `true`, so that we can receive a complete output
+    /// document.
+    ///
+    /// If this model instance was never written to the database, this operation will return an
+    /// error.
+    async fn update_with_session(
+        self,
+        db: &Database,
+        filter: Option<Document>,
+        update: Document,
+        opts: Option<options::FindOneAndUpdateOptions>,
+        session: &mut ClientSession,
+    ) -> Result<Self> {
+        // Extract model's ID & use as filter for this operation.
+        let id = self.id().ok_or(WitherError::ModelIdRequiredForOperation)?;
+
+        // Ensure we have a valid filter.
+        let filter = match filter {
+            Some(mut doc) => {
+                doc.insert("_id", id);
+                doc
+            }
+            None => doc! {"_id": id},
+        };
+
+        // Ensure that journaling is set to true for this call for full output document.
+        let options = match opts {
+            Some(mut options) => {
+                options.write_concern = match options.write_concern {
+                    Some(mut wc) => {
+                        wc.journal = Some(true);
+                        Some(wc)
+                    }
+                    None => {
+                        let mut wc = Self::write_concern().unwrap_or_default();
+                        wc.journal = Some(true);
+                        Some(wc)
+                    }
+                };
+                options
+            }
+            None => {
+                let mut options = options::FindOneAndUpdateOptions::default();
+                let mut wc = Self::write_concern().unwrap_or_default();
+                wc.journal = Some(true);
+                options.write_concern = Some(wc);
+                options
+            }
+        };
+
+        // Perform a FindOneAndUpdate operation on this model's document by ID.
+        Ok(Self::collection(db)
+            .find_one_and_update(filter, update)
+            .with_options(Some(options))
+            .session(session)
+            .await?
+            .ok_or(WitherError::ServerFailedToReturnUpdatedDoc)?)
+    }
+
     /// Delete this model instance by ID.
     ///
     /// Wraps the driver's `Collection.delete_one` method.
@@ -275,6 +452,15 @@ where
         // Return an error if the instance was never saved.
         let id = self.id().ok_or(WitherError::ModelIdRequiredForOperation)?;
         Ok(Self::collection(db).delete_one(doc! {"_id": id}).await?)
+    }
+
+    /// Delete this model instance by ID.
+    ///
+    /// Wraps the driver's `Collection.delete_one` method.
+    async fn delete_with_session(&self, db: &Database, session: &mut ClientSession) -> Result<DeleteResult> {
+        // Return an error if the instance was never saved.
+        let id = self.id().ok_or(WitherError::ModelIdRequiredForOperation)?;
+        Ok(Self::collection(db).delete_one(doc! {"_id": id}).session(session).await?)
     }
 
     /// Deletes all documents stored in the collection matching filter.
@@ -285,6 +471,19 @@ where
         O: Into<Option<options::DeleteOptions>> + Send,
     {
         Ok(Self::collection(db).delete_many(filter).with_options(options).await?)
+    }
+    /// Deletes all documents stored in the collection matching filter.
+    ///
+    /// Wraps the driver's `Collection.delete_many` method.
+    async fn delete_many_with_session<O>(db: &Database, filter: Document, options: O, session: &mut ClientSession) -> Result<DeleteResult>
+    where
+        O: Into<Option<options::DeleteOptions>> + Send,
+    {
+        Ok(Self::collection(db)
+            .delete_many(filter)
+            .with_options(options)
+            .session(session)
+            .await?)
     }
 
     //////////////////////////////////////////////////////////////////////////////////////////////
@@ -405,11 +604,16 @@ fn build_index_map(list_index: Document) -> HashMap<String, IndexModel> {
                 None => return acc,
             };
 
+            /*
             match idx_keys.get_str("_fts").ok() {
                 Some(_) => return acc,
                 None => {}
             }
+             */
 
+            if idx_keys.get_str("_fts").is_ok() {
+                return acc
+            }
             let index_name = generate_index_name_from_keys(idx_keys);
 
             // Build index model, filtering out blacklisted keys.
