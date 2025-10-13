@@ -3,18 +3,18 @@ authors = ["Anthony Dodd <Dodd.AnthonyJosiah@gmail.com>"]
 categories = ["database", "data-structures"]
 description = "An ODM for MongoDB built upon the mongo rust driver."
 documentation = "https://docs.rs/wither"
-homepage = "https://github.com/thedodd/wither"
+homepage = "https://github.com/hermantolim/wither"
 keywords = ["mongodb", "database", "bson", "nosql", "odm"]
 license = "Apache-2.0"
 name = "wither"
 readme = "../README.md"
-repository = "https://github.com/thedodd/wither"
+repository = "https://github.com/hermantolim/wither"
 version = "0.9.0"
 edition = "2018"
 
 [dependencies]
-chrono = { version = "0.4.38" }
-log = { version = "0.4.22" }
+chrono = { version = "0.4.39" }
+log = { version = "0.4.26" }
 serde = { version = "1", features = ["derive"] }
 wither_derive = { version = "0.9.0", path = "../wither_derive", default-features = false }
 async-trait = { version = "0.1.81" }
